@@ -2,89 +2,68 @@ pipeline {
     agent any
 
     environment {
-        // 🔐 AWS Credentials (Jenkins Credentials IDs)
-        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
-        AWS_DEFAULT_REGION    = "ap-south-1"
-
-        // EKS Cluster
-        CLUSTER_NAME = "softapp-eks-cluster-2"
+        IMAGE_NAME = "akhil9718/admin-dashbaord"
+        IMAGE_TAG  = "039"
     }
 
     stages {
 
-        stage('Checkout Code') {
+        stage('Checkout Code from GitLab') {
             steps {
                 git branch: 'main',
-                    url: 'https://github.com/akhil9718/project-2.git'
+                    url: 'https://gitlab.com/SOFTAPP-TECHNOLOGIES/k8s-jenkins-cicd-pipeline.git'
             }
         }
 
-        stage('Verify AWS Identity') {
+        stage('Docker Build') {
             steps {
-                bat 'aws sts get-caller-identity'
+                bat '''
+                docker build -t %IMAGE_NAME%:%IMAGE_TAG% .
+                '''
             }
         }
 
-        stage('Terraform Init') {
+        stage('Docker Login & Push') {
             steps {
-                dir('terraform') {
-                    bat 'terraform init'
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-creds',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    bat '''
+                    echo %DOCKER_PASS% | docker login -u %DOCKER_USER% --password-stdin
+                    docker push %IMAGE_NAME%:%IMAGE_TAG%
+                    '''
                 }
             }
         }
 
-        stage('Terraform Plan') {
+        stage('Update Kubernetes Image in YAML') {
             steps {
-                dir('terraform') {
-                    bat 'terraform plan'
-                }
-            }
-        }
-
-        stage('Terraform Apply') {
-            steps {
-                dir('terraform') {
-                    bat 'terraform apply -auto-approve'
-                }
-            }
-        }
-
-        stage('Update kubeconfig') {
-            steps {
-                bat """
-                aws eks update-kubeconfig ^
-                --name %CLUSTER_NAME% ^
-                --region %AWS_DEFAULT_REGION% ^
-                --alias jenkins-eks
-                """
-            }
-        }
-
-        stage('Wait for Nodes (IMPORTANT)') {
-            steps {
-                retry(10) {
-                    bat 'kubectl get nodes'
-                }
+                powershell '''
+                $image = "$env:IMAGE_NAME`:$env:IMAGE_TAG"
+                (Get-Content k8s\\deployment.yaml) `
+                  -replace "IMAGE_NAME", $image |
+                Set-Content k8s\\deployment.yaml
+                '''
             }
         }
 
         stage('Deploy to Kubernetes') {
             steps {
-                bat '''
-                kubectl apply -f k8s\\deployment.yaml
-                kubectl apply -f k8s\\service.yaml
-                '''
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    bat '''
+                    set KUBECONFIG=%KUBECONFIG%
+
+                    kubectl get nodes || exit /b 1
+
+                    kubectl apply -f k8s/deployment.yaml || exit /b 1
+                    kubectl apply -f k8s/service.yaml || exit /b 1
+                    '''
+                }
             }
         }
-    }
 
-    post {
-        success {
-            echo '✅ CI/CD Pipeline completed successfully'
-        }
-        failure {
-            echo '❌ Pipeline failed – check logs'
-        }
     }
+}
 }
